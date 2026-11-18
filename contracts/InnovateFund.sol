@@ -66,6 +66,7 @@ contract InnovateFund {
         Campaign storage c = campaigns[id];
         require(c.creator != address(0) && block.timestamp < c.deadline, "Funding closed");
         require(msg.value > 0, "Zero contribution");
+        require(c.raised < c.goal && msg.value <= c.goal - c.raised, "Goal reached");
         if (!seenContributor[id][msg.sender]) { seenContributor[id][msg.sender] = true; contributorsCount[id]++; }
         contributions[id][msg.sender] += msg.value; c.raised += msg.value;
         emit Contributed(id, msg.sender, msg.value);

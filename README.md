@@ -1,4 +1,4 @@
-# InnovateFund — Blockchain Crowdfunding & Milestone Fund Management
+# CommonFund — Funding with proof
 
 ระบบระดมทุน Ethereum แบบ Escrow: เงิน ETH ของผู้สนับสนุนถูกเก็บใน Smart Contract และจ่ายให้เจ้าของโครงการได้เมื่อ Milestone ผ่านการโหวตตามเงื่อนไขเท่านั้น
 
@@ -15,7 +15,7 @@
 
 1. เจ้าของสร้าง Campaign โดยระบุชื่อ คำอธิบาย เป้าหมาย ETH ระยะเวลา และ Milestone (สูงสุด 20 รายการ)
 2. ยอดรวมที่จัดสรรให้ Milestones ต้องไม่เกินเป้าหมายการระดมทุน
-3. Backer ส่ง ETH ก่อน deadline; เงินคงอยู่ใน Contract
+3. Backer ส่ง ETH ก่อน deadline; Contract ปฏิเสธยอดที่ทำให้ระดมทุนเกินเป้าหมาย และเก็บเงินไว้จนกว่าจะปล่อยหรือคืน
 4. หลัง deadline หากยอดรวมถึงเป้าหมาย Creator จึงขอเบิก Milestone แรกได้ โดยส่งข้อความ/URL หลักฐาน
 5. แต่ละ Milestone เปิดโหวต **3 วัน**; น้ำหนักคะแนนเท่ากับยอด ETH ที่สนับสนุน ผู้สนับสนุนหนึ่ง Wallet โหวตได้ครั้งเดียวต่อ Milestone
 6. เมื่อครบ 3 วัน ต้องมีคะแนนเห็นชอบ **มากกว่า 50% ของยอดเงินระดมทุนทั้งหมด** จึงให้ใครก็ได้เรียก `release()` เพื่อจ่ายให้ Creator (ไม่จ่ายอัตโนมัติด้วยตัวเอง)
@@ -42,3 +42,5 @@ npm run dev
 8. ทดสอบ Refund ด้วยอีก Campaign ที่ยอดไม่ถึงเป้าหมายเมื่อหมดเวลา
 
 > Remix UI `VALUE` สำหรับธุรกรรม payable ต้องเลือกหน่วย `Ether` แล้วกรอกตัวเลขที่ช่อง Value **ก่อน** กดปุ่ม `contribute`; ฟังก์ชัน `contribute` รับ Campaign ID ส่วน ETH มาจาก `msg.value` ไม่ใช่อาร์กิวเมนต์ฟังก์ชัน
+
+> หากแก้ Smart Contract ต้อง Deploy ใหม่และเปลี่ยน `VITE_CONTRACT_ADDRESS` ใน `.env`; Campaign ที่อยู่ใน Contract เดิมจะไม่ย้ายตามไปด้วย

@@ -2,12 +2,12 @@ import { ethers } from "ethers";
 export const ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || "";
 export const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID || 11155111);
 const infuraId = import.meta.env.VITE_INFURA_PROJECT_ID || "";
-export const readProvider = infuraId
-  ? new ethers.JsonRpcProvider(
-      `https://sepolia.infura.io/v3/${infuraId}`,
-      CHAIN_ID,
-    )
-  : null;
+const rpcUrl =
+  import.meta.env.VITE_RPC_URL ||
+  (infuraId
+    ? `https://sepolia.infura.io/v3/${infuraId}`
+    : "https://ethereum-sepolia-rpc.publicnode.com");
+export const readProvider = new ethers.JsonRpcProvider(rpcUrl, CHAIN_ID);
 export const ABI = [
   "function admin() view returns (address)",
   "function campaignCount() view returns (uint256)",
@@ -29,8 +29,8 @@ export const ABI = [
   "event Refunded(uint256 indexed id,address indexed backer,uint256 amount)",
 ];
 export const readContract = () => {
-  if (!ADDRESS || !readProvider)
-    throw Error("กรุณาตั้งค่า .env สำหรับ Contract และ Infura");
+  if (!ADDRESS)
+    throw Error("กรุณาตั้งค่า VITE_CONTRACT_ADDRESS ในไฟล์ .env");
   return new ethers.Contract(ADDRESS, ABI, readProvider);
 };
 export const writeContract = async () => {

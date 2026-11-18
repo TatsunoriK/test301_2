@@ -32,6 +32,33 @@ import {
 const short = (a) => (a ? `${a.slice(0, 6)}...${a.slice(-4)}` : "");
 const fmtDate = (ts) => new Date(Number(ts) * 1000).toLocaleString("th-TH");
 const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+const remainingTime = (deadline, now) => {
+  const seconds = Math.max(0, Number(deadline) - Math.floor(now / 1000));
+  if (!seconds) return "หมดเวลาแล้ว";
+  if (seconds < 60) return "เหลือน้อยกว่า 1 นาที";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `เหลือ ${days} วัน ${hours} ชม.`;
+  if (hours) return `เหลือ ${hours} ชม. ${minutes} นาที`;
+  return `เหลือ ${minutes} นาที`;
+};
+const eventLabel = (event) => {
+  if (event.name === "CampaignCreated") return "สร้างโครงการ";
+  if (event.name === "Contributed") return "เงินสนับสนุนเข้า";
+  if (event.name === "ReleaseRequested") return "ส่งหลักฐานขอเบิก";
+  if (event.name === "Voted")
+    return event.args[3] ? "ลงคะแนนเห็นชอบ" : "ลงคะแนนไม่เห็นชอบ";
+  if (event.name === "FundsReleased") return "จ่ายเงินออก";
+  if (event.name === "Refunded") return "คืนเงิน";
+  return event.name;
+};
+const eventAmount = (event) => {
+  if (event.name === "Contributed" || event.name === "FundsReleased" || event.name === "Refunded")
+    return event.args[2];
+  if (event.name === "Voted") return event.args[4];
+  return null;
+};
 const initial = {
   title: "",
   description: "",
@@ -53,6 +80,11 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
   const [events, setEvents] = useState([]);
+  const [dashboardEvents, setDashboardEvents] = useState([]);
+  const [overviewMilestones, setOverviewMilestones] = useState([]);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewLimit, setOverviewLimit] = useState(8);
+  const [now, setNow] = useState(Date.now());
   const [mobile, setMobile] = useState(false);
   const isAdmin = same(account, admin);
   const owned = useMemo(
@@ -71,8 +103,8 @@ function App() {
       ].filter(Boolean)
     : ["Guest"];
   const navigation = [
+    { id: "dashboard", label: "ภาพรวม", icon: LayoutDashboard },
     { id: "explore", label: "สำรวจโครงการ", icon: Compass },
-    // { id: "dashboard", label: "ภาพรวม", icon: LayoutDashboard },
     ...(account
       ? [{ id: "create", label: "สร้างโครงการ", icon: PlusCircle }]
       : []),
@@ -86,6 +118,10 @@ function App() {
       ? [{ id: "admin", label: "ผู้ดูแลระบบ", icon: ShieldCheck }]
       : []),
   ];
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   const load = useCallback(async () => {
     if (!ADDRESS || !readProvider) return;
     setLoading(true);
@@ -117,6 +153,28 @@ function App() {
         }),
       );
       setCampaigns(data.reverse());
+      const tip = await readProvider.getBlockNumber();
+      const logs = await readProvider.getLogs({
+        address: ADDRESS,
+        fromBlock: Math.max(0, tip - 9000),
+        toBlock: tip,
+      });
+      const iface = new ethers.Interface(ABI);
+      const parsed = logs
+        .map((log) => {
+          try {
+            const event = iface.parseLog(log);
+            return event
+              ? { event, hash: log.transactionHash, blockNumber: log.blockNumber }
+              : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry) => entry && Number(entry.event.args[0]) > 0)
+        .reverse()
+        .slice(0, 30);
+      setDashboardEvents(parsed);
     } catch (e) {
       setMessage({ error: true, text: e.shortMessage || e.message });
     } finally {
@@ -126,6 +184,63 @@ function App() {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    if (tab !== "dashboard" || !campaigns.length) {
+      setOverviewMilestones([]);
+      return;
+    }
+    let cancelled = false;
+    setOverviewLoading(true);
+    const readLatest = async () => {
+      const c = readContract();
+      const rows = await Promise.all(
+        campaigns.slice(0, overviewLimit).map(async (campaign) => {
+          const milestones = await Promise.all(
+            Array.from({ length: campaign.milestoneCount }, (_, index) =>
+              c.getMilestone(campaign.id, index),
+            ),
+          );
+          return {
+            id: campaign.id,
+            title: campaign.title,
+            milestones: milestones.map((milestone, index) => ({
+              index,
+              title: milestone.title,
+              amount: milestone.amount,
+              status: milestone.paid
+                ? "จ่ายแล้ว"
+                : milestone.requested
+                  ? now / 1000 < Number(milestone.voteDeadline)
+                    ? "กำลังเปิดโหวต"
+                    : milestone.approvals > milestone.votingPowerSnapshot / 2n
+                      ? "โหวตผ่าน · รอจ่าย"
+                      : "โหวตไม่ผ่าน"
+                  : now / 1000 < Number(campaign.deadline)
+                    ? campaign.raised >= campaign.goal
+                      ? "รอปิดระดมทุน"
+                      : "ระหว่างระดมทุน"
+                    : campaign.raised < campaign.goal
+                      ? "ระดมทุนไม่ถึงเป้า"
+                      : index > 0 && !milestones[index - 1].paid
+                        ? "รอ Milestone ก่อนหน้า"
+                        : "รอส่งหลักฐาน",
+            })),
+          };
+        }),
+      );
+      if (!cancelled) setOverviewMilestones(rows);
+    };
+    readLatest()
+      .catch(() => {
+        if (!cancelled) setOverviewMilestones([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOverviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, campaigns, now, overviewLimit]);
   useEffect(() => {
     if (!window.ethereum) return;
     const changed = (a) => {
@@ -215,7 +330,7 @@ function App() {
         void filter;
         const logs = await readProvider.getLogs({
           address: ADDRESS,
-          fromBlock: Math.max(0, (await readProvider.getBlockNumber()) - 45000),
+          fromBlock: Math.max(0, (await readProvider.getBlockNumber()) - 9000),
           toBlock: "latest",
         });
         const iface = new ethers.Interface(ABI);
@@ -290,8 +405,10 @@ function App() {
       </div>
       <div className="campaign-body">
         <div className="tag">
-          {Date.now() / 1000 < Number(c.deadline)
-            ? "กำลังระดมทุน"
+          {now / 1000 < Number(c.deadline)
+            ? c.raised >= c.goal
+              ? "ถึงเป้าหมายแล้ว"
+              : "กำลังระดมทุน"
             : c.raised >= c.goal
               ? "ระดมทุนสำเร็จ"
               : "ไม่ถึงเป้าหมาย"}
@@ -317,10 +434,7 @@ function App() {
             % ของเป้าหมาย
           </span>
           <span>
-            {Date.now() / 1000 < Number(c.deadline)
-              ? "สิ้นสุด " +
-                new Date(Number(c.deadline) * 1000).toLocaleDateString("th-TH")
-              : "ปิดระดมทุน"}
+            {remainingTime(c.deadline, now)}
           </span>
         </div>
       </div>
@@ -329,14 +443,25 @@ function App() {
   const stats = [
     { name: "โครงการทั้งหมด", value: campaigns.length, icon: LayoutDashboard },
     {
-      name: "ยอดระดมทุนรวม",
-      value: eth(campaigns.reduce((a, c) => a + c.raised, 0n)) + " ETH",
+      name: "เงินสนับสนุนเข้า",
+      value: `${eth(campaigns.reduce((sum, campaign) => sum + campaign.raised, 0n))} ETH`,
       icon: Coins,
+    },
+    {
+      name: "จ่ายให้เจ้าของโครงการ",
+      value: `${eth(campaigns.reduce((sum, campaign) => sum + campaign.released, 0n))} ETH`,
+      icon: ArrowRight,
+    },
+    {
+      name: "คืนให้ผู้สนับสนุน",
+      value: `${eth(campaigns.reduce((sum, campaign) => sum + campaign.refunded, 0n))} ETH`,
+      icon: History,
     },
     {
       name: "โครงการที่สำเร็จ",
       value: campaigns.filter(
-        (c) => c.raised >= c.goal && Date.now() / 1000 >= Number(c.deadline),
+        (campaign) =>
+          campaign.raised >= campaign.goal && now / 1000 >= Number(campaign.deadline),
       ).length,
       icon: CheckCircle2,
     },
@@ -355,11 +480,11 @@ function App() {
             <Coins size={23} />
           </div>
           <div>
-            <strong>Blockchain</strong>
-            <small>Crowdfunding</small>
+            <strong>CommonFund</strong>
+            <small>PROJECT FINANCE</small>
           </div>
         </div>
-        <div className="side-label">WORKSPACE</div>
+        <div className="side-label">FUNDING DESK</div>
         <nav>
           {navigation.map((n) => (
             <button
@@ -389,7 +514,7 @@ function App() {
             <Menu />
           </button>
           <div className="crumb">
-            Blockchain <span>/</span>{" "}
+            CommonFund <span>/</span>{" "}
             <b>
               {navigation.find((n) => n.id === tab)?.label ||
                 "รายละเอียดโครงการ"}
@@ -424,15 +549,16 @@ function App() {
             <>
               <section className="hero">
                 <div>
-                  <span className="eyebrow">THE FUTURE OF FUNDING</span>
+                  <span className="eyebrow">
+                    A MORE ACCOUNTABLE WAY TO FUND
+                  </span>
                   <h1>
-                    สร้างนวัตกรรม
+                    ไอเดียดี เติบโต
                     <br />
-                    <em>ด้วยพลังของทุกคน</em>
+                    <em>ด้วยความไว้ใจ</em>
                   </h1>
                   <p>
-                    แพลตฟอร์มระดมทุนที่โปร่งใส ปลอดภัย
-                    และจ่ายเงินตามความสำเร็จของแต่ละ Milestone
+                    ทุกยอดสนับสนุนมีที่มา ทุกการเบิกจ่ายผูกกับผลงานที่ตรวจสอบได้
                   </p>
                   <button className="primary" onClick={() => setTab("explore")}>
                     สำรวจโครงการ <ArrowRight size={17} />
@@ -452,6 +578,106 @@ function App() {
                     <strong>{s.value}</strong>
                   </div>
                 ))}
+              </div>
+              <div className="dashboard-panels">
+                <section className="panel ledger-panel">
+                  <div className="between dashboard-panel-head">
+                    <div>
+                      <span className="eyebrow">ON-CHAIN ACTIVITY</span>
+                      <h2>บัญชีเงินเข้า–ออก</h2>
+                      <p className="muted small">
+                        Event ล่าสุดจากทุกโครงการ · ย้อนหลัง 9,000 บล็อก
+                      </p>
+                    </div>
+                    <button className="outline" onClick={load}>
+                      <RefreshCw size={16} /> อัปเดต
+                    </button>
+                  </div>
+                  <div className="ledger-list">
+                    {dashboardEvents.map((entry, index) => {
+                      const event = entry.event;
+                      const projectId = Number(event.args[0]);
+                      const project = campaigns.find((campaign) => campaign.id === projectId);
+                      const amount = eventAmount(event);
+                      const financial = ["Contributed", "FundsReleased", "Refunded"].includes(event.name);
+                      return (
+                        <div className="ledger-row" key={`${entry.hash}-${index}`}>
+                          <span className={`ledger-mark ${event.name === "Contributed" ? "in" : event.name === "FundsReleased" || event.name === "Refunded" ? "out" : "record"}`}>
+                            {event.name === "Contributed" ? "+" : event.name === "FundsReleased" || event.name === "Refunded" ? "−" : "·"}
+                          </span>
+                          <div className="ledger-copy">
+                            <strong>{eventLabel(event)}</strong>
+                            <span className="muted small">
+                              #{projectId} {project?.title || "โครงการ"}
+                              {event.name === "ReleaseRequested" ? ` · Milestone ${Number(event.args[1]) + 1}` : ""}
+                              {event.name === "Voted" ? ` · Milestone ${Number(event.args[1]) + 1}` : ""}
+                              {` · Block ${entry.blockNumber}`}
+                            </span>
+                          </div>
+                          <div className="ledger-value">
+                            {amount !== null && (
+                              <strong className={financial ? (event.name === "Contributed" ? "positive" : "negative") : ""}>
+                                {event.name === "Contributed" ? "+" : financial ? "−" : event.name === "Voted" ? "น้ำหนัก " : ""}{eth(amount)} ETH
+                              </strong>
+                            )}
+                            {event.name === "CampaignCreated" && (
+                              <strong>เป้าหมาย {eth(event.args[3])} ETH</strong>
+                            )}
+                            <a href={`https://sepolia.etherscan.io/tx/${entry.hash}`} target="_blank" rel="noreferrer">
+                              {short(entry.hash)} <ExternalLink size={12} />
+                            </a>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {!dashboardEvents.length && (
+                      <p className="empty compact">
+                        ยังไม่มี Event ในช่วงบล็อกที่ตรวจสอบ
+                      </p>
+                    )}
+                  </div>
+                </section>
+                <section className="panel milestone-board">
+                  <div className="dashboard-panel-head">
+                    <span className="eyebrow">DELIVERY TRACKER</span>
+                    <h2>สถานะ Milestone</h2>
+                    <p className="muted small">
+                      แสดง {overviewMilestones.length} จาก {campaigns.length} โครงการล่าสุด
+                    </p>
+                  </div>
+                  <div className="milestone-board-list">
+                    {overviewMilestones.map((project) => (
+                      <div className="overview-project" key={project.id}>
+                        <button className="link overview-project-title" onClick={() => openCampaign(project.id)}>
+                          <span>#{project.id} {project.title}</span>
+                          <ArrowRight size={14} />
+                        </button>
+                        {project.milestones.map((milestone) => (
+                          <div className="overview-milestone" key={milestone.index}>
+                            <span className="muted">
+                              {milestone.index + 1}. {milestone.title}
+                            </span>
+                            <span className={`milestone-state ${milestone.status === "จ่ายแล้ว" ? "done" : milestone.status === "กำลังเปิดโหวต" ? "voting" : "waiting"}`}>
+                              {milestone.status}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                    {overviewLoading && <p className="muted small">กำลังอ่านสถานะจาก Smart Contract…</p>}
+                    {!overviewLoading && !overviewMilestones.length && (
+                      <p className="muted small">ยังไม่มีโครงการให้แสดงสถานะ</p>
+                    )}
+                    {!overviewLoading && overviewMilestones.length < campaigns.length && (
+                      <button
+                        className="outline full"
+                        onClick={() => setOverviewLimit((limit) => limit + 8)}
+                      >
+                        โหลดอีก 8 โครงการ
+                      </button>
+                    )}
+                  </div>
+                </section>
               </div>
               <div className="section-head">
                 <div>
@@ -667,7 +893,7 @@ function App() {
                   <p className="muted">{selected.description}</p>
                   <p className="small muted">
                     เจ้าของโครงการ: {short(selected.creator)} · สิ้นสุด{" "}
-                    {fmtDate(selected.deadline)}
+                    {fmtDate(selected.deadline)} · {remainingTime(selected.deadline, now)}
                   </p>
                 </div>
               </div>
@@ -677,8 +903,10 @@ function App() {
                     <div className="between">
                       <h2>ความคืบหน้าการระดมทุน</h2>
                       <span className="tag">
-                        {Date.now() / 1000 < Number(selected.deadline)
-                          ? "เปิดระดมทุน"
+                        {now / 1000 < Number(selected.deadline)
+                          ? selected.raised >= selected.goal
+                            ? "ถึงเป้าหมายแล้ว"
+                            : "เปิดระดมทุน"
                           : "ปิดระดมทุน"}
                       </span>
                     </div>
@@ -704,7 +932,7 @@ function App() {
                       const owner = same(account, selected.creator),
                         canRequest =
                           owner &&
-                          Date.now() / 1000 >= Number(selected.deadline) &&
+                          now / 1000 >= Number(selected.deadline) &&
                           selected.raised >= selected.goal &&
                           !m.requested &&
                           (i === 0 || detail.ms[i - 1].paid);
@@ -712,12 +940,12 @@ function App() {
                         BigInt(detail.mine) > 0n &&
                         m.requested &&
                         !m.paid &&
-                        Date.now() / 1000 < Number(m.voteDeadline) &&
+                        now / 1000 < Number(m.voteDeadline) &&
                         !detail.votes[i];
                       const canRelease =
                         m.requested &&
                         !m.paid &&
-                        Date.now() / 1000 >= Number(m.voteDeadline) &&
+                        now / 1000 >= Number(m.voteDeadline) &&
                         m.approvals > m.votingPowerSnapshot / 2;
                       return (
                         <div className="milestone" key={i}>
@@ -838,7 +1066,7 @@ function App() {
                       <History size={19} /> ประวัติธุรกรรมล่าสุด
                     </h2>
                     <p className="muted small">
-                      อ่าน Event จากเครือข่ายย้อนหลังประมาณ 45,000 บล็อก
+                      อ่าน Event จากเครือข่ายย้อนหลังประมาณ 9,000 บล็อก
                       (ไม่ใช่ประวัติทั้งหมด)
                     </p>
                     {events.map((e, i) => (
@@ -876,7 +1104,8 @@ function App() {
                     <p className="muted small">
                       เงิน ETH จะถูกเก็บใน Smart Contract
                     </p>
-                    {Date.now() / 1000 < Number(selected.deadline) ? (
+                    {now / 1000 < Number(selected.deadline) &&
+                    selected.raised < selected.goal ? (
                       <>
                         <label>
                           จำนวน ETH
@@ -905,7 +1134,11 @@ function App() {
                         </button>
                       </>
                     ) : (
-                      <p className="muted">หมดเวลาระดมทุนแล้ว</p>
+                      <p className="muted">
+                        {now / 1000 < Number(selected.deadline)
+                          ? "ถึงเป้าหมายการระดมทุนแล้ว"
+                          : "หมดเวลาระดมทุนแล้ว"}
+                      </p>
                     )}
                     {account && (
                       <>
@@ -913,7 +1146,7 @@ function App() {
                         <p>
                           คุณสนับสนุนแล้ว <b>{eth(detail?.mine)} ETH</b>
                         </p>
-                        {Date.now() / 1000 >= Number(selected.deadline) &&
+                        {now / 1000 >= Number(selected.deadline) &&
                           selected.raised < selected.goal &&
                           BigInt(detail?.mine || 0) > 0n && (
                             <button
@@ -973,7 +1206,7 @@ function App() {
             </>
           )}
           <footer>
-            InnovateFund · Ethereum Sepolia Testnet · โปรดใช้ ETH ทดสอบเท่านั้น
+            CommonFund · Ethereum Sepolia Testnet · ใช้เฉพาะ ETH ทดสอบ
           </footer>
         </div>
       </main>
